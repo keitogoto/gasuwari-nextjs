@@ -1,0 +1,8 @@
+node_modules
+.next
+out
+.git
+.github
+*.md
+.env
+.env.local
