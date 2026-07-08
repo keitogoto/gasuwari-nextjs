@@ -1,30 +1,16 @@
-version: '3.9'
-
 services:
   app:
-    # GitHub Actionsがビルドしてghcr.ioにpushしたイメージを指定する
-    # 例: ghcr.io/<GitHubユーザー名>/gasuwari-nextjs:latest
     image: ghcr.io/keitogoto/gasuwari-nextjs:latest
     container_name: gasuwari-app
     restart: unless-stopped
     ports:
-      # 外部には公開せず、Cloudflare Tunnelからのみアクセスさせる
       - '127.0.0.1:3000:3000'
-    labels:
-      # Watchtowerに「このコンテナは自動更新対象」と伝える
-      - 'com.centurylinklabs.watchtower.enable=true'
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: gasuwari-tunnel
-    restart: unless-stopped
-    command: tunnel run
     environment:
-      # Cloudflare Zero Trustダッシュボードで発行したトンネルトークンを
-      # .env ファイルに TUNNEL_TOKEN=xxxxx として保存しておく
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    depends_on:
-      - app
+      - LOG_DIR=/app/logs
+    volumes:
+      - gasuwari-logs:/app/logs
+    labels:
+      - 'com.centurylinklabs.watchtower.enable=true'
 
   watchtower:
     image: nickfedor/watchtower
@@ -33,5 +19,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --label-enable --cleanup --interval 60
-    # labelを付けたコンテナ(app)だけを60秒ごとにチェックし、
-    # 新しいイメージがghcr.ioにあれば自動でpull&再起動する
+
+volumes:
+  gasuwari-logs:
