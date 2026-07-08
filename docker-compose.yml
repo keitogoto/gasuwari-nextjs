@@ -27,7 +27,7 @@ services:
       - app
 
   watchtower:
-    image: containrrr/watchtower
+    image: nickfedor/watchtower
     container_name: gasuwari-watchtower
     restart: unless-stopped
     volumes:
