@@ -7,10 +7,25 @@ import GasuwariApp from '../components/GasuwariApp';
 // /app/logs (マウントしたボリューム) に向ける。ローカル開発時はプロジェクト内の ./logs に書く。
 const LOG_DIR = process.env.LOG_DIR || path.join(process.cwd(), 'logs');
 
+// UTC→JST(+9時間)に変換して "YYYY-MM-DD HH:mm:ss JST" の形式にする。
+// Intl/タイムゾーンDBに依存させず、時刻の足し算だけで変換するので
+// Alpineなど軽量なDockerイメージでも確実に動く。
+function formatJST(date) {
+  const jst = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  const y = jst.getUTCFullYear();
+  const mo = pad(jst.getUTCMonth() + 1);
+  const d = pad(jst.getUTCDate());
+  const h = pad(jst.getUTCHours());
+  const mi = pad(jst.getUTCMinutes());
+  const s = pad(jst.getUTCSeconds());
+  return `${y}-${mo}-${d} ${h}:${mi}:${s} JST`;
+}
+
 function logAccess(userAgent) {
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
-    const time = new Date().toISOString();
+    const time = formatJST(new Date());
     const line = `${time}\t${userAgent}\n`;
     fs.appendFileSync(path.join(LOG_DIR, 'access.log'), line);
   } catch (err) {
