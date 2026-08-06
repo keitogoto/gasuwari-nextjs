@@ -2,22 +2,37 @@
 
 このドキュメントは、「ガスワリ！」というドライブ費用の割り勘計算アプリが**どんな技術で・どういう仕組みで動いているか**、そして**今後どう機能追加・デバッグ・運用していくか**を一つにまとめたものです。この構築作業に関わっていない人が読んでも、環境の全体像がわかることを目指しています。
 
-> 最終更新時点の構成: Next.js 16 + Docker + Tailscale Funnel(Raspberry Pi 3上で稼働)+ GitHub Actions/ghcr.io + Watchtower(nickfedor版フォーク)+ アクセスログ機能
+> 最終更新時点の構成: Next.js 16 の静的書き出し(`output: 'export'`)+ GitHub Pages + GitHub Actions + Service Worker によるオフライン対応。**サーバーは一切使っていない。**
 
 ---
 
 ## 1. このアプリは何か
 
-スマホのブラウザから使う、ドライブでかかった費用(ガソリン代・高速代・その他費用)を乗車人数で割り勘計算するWebアプリ。個人のRaspberry Piでホストされており、インターネット上のどこからでもURLでアクセスできる(スマホの「ホーム画面に追加」でアプリのように使える = PWA)。
+スマホのブラウザから使う、ドライブでかかった費用(ガソリン代・高速代・その他費用)を乗車人数で割り勘計算するWebアプリ。やっていることは計算だけなので、サーバーで動く処理は存在せず、HTML/CSS/JavaScript の詰め合わせとして配信されるだけ。スマホの「ホーム画面に追加」でアプリのように使え、一度開けば圏外でも動く(PWA)。
 
 ---
 
-## 2. システム全体像
+## 2. なぜサーバーを無くしたのか(以前の構成との違い)
 
-大きく分けて2つの流れがある。
+以前は Raspberry Pi 上の Docker で Next.js サーバーを常時起動し、Tailscale Funnel で外部公開していた。しかしこのアプリがサーバーを必要としていたのは**アクセスログの記録だけ**で、肝心の割り勘計算・レシートの画像化はすべてブラウザ内で完結していた。
 
-1. **開発・デプロイの流れ**: 開発者(Mac)がコードを直すと、自動的に本番(ラズパイ)に反映される
-2. **実行時のアクセスの流れ**: スマホからアクセスすると、そのリクエストがラズパイのアプリまで届き、アクセスログが記録される
+そこでアクセスログ機能を廃止し、静的サイトとして書き出す構成に変更した。
+
+| | 以前 | 現在 |
+|---|---|---|
+| 実行基盤 | Raspberry Pi 3 + Docker | なし(静的ファイルのみ) |
+| 配信 | Tailscale Funnel | GitHub Pages |
+| ビルド成果物 | Dockerイメージ(ghcr.io) | 静的ファイル一式(`out/`) |
+| 自動更新 | Watchtower | GitHub Actions が直接デプロイ |
+| アクセスログ | あり(`fs` でファイルに追記) | なし(記録する場所が無い) |
+| 圏外での動作 | 不可 | 可(Service Worker) |
+| 家の電気・Piの死活 | 依存する | 依存しない |
+
+失ったのはアクセスログだけで、得たものは「Piが落ちていても使える」「電気代ゼロ」「オフラインで動く」。
+
+---
+
+## 3. システム全体像
 
 ```mermaid
 flowchart TB
@@ -27,253 +42,171 @@ flowchart TB
 
     subgraph GitHub["GitHub"]
         B --> C[リポジトリ: keitogoto/gasuwari-nextjs]
-        C --> D["GitHub Actions\n(.github/workflows/deploy.yml)"]
-        D -->|"Dockerイメージをビルド\n(linux/arm64)"| E["ghcr.io\nghcr.io/keitogoto/gasuwari-nextjs"]
+        C --> D[".github/workflows/deploy.yml"]
+        D -->|"npm ci → npm run build"| E["out/ (静的ファイル一式)\nHTML / JS / CSS / アイコン / sw.js"]
+        E --> F["GitHub Pages\nhttps://keitogoto.github.io/gasuwari-nextjs/"]
     end
 
-    subgraph Pi["Raspberry Pi 3 (自宅)"]
-        F["Watchtower (nickfedor/watchtower)\n60秒おきにghcr.ioを確認"] -->|新イメージがあればpull&再起動| G["Dockerコンテナ: app\nNext.jsサーバー\n127.0.0.1:3000"]
-        E -.->|イメージ取得| F
-        G -->|アクセスの度に追記| L[("gasuwari-logs\n名前付きボリューム\n/app/logs/access.log")]
-        H["Tailscale (tailscaled)\nFunnelでHTTPS公開"] --> G
+    subgraph Phone["スマホ"]
+        G["ブラウザ / ホーム画面のアイコン"]
+        H[("Service Worker のキャッシュ\nアプリ一式まるごと")]
+        G -->|初回アクセス| F
+        F -->|"ファイル一式を保存"| H
+        H -->|"2回目以降は\nここから起動(圏外でもOK)"| G
     end
-
-    subgraph Internet["インターネット"]
-        I["スマホのブラウザ\nhttps://raspberrypi.tailbcc39a.ts.net"]
-    end
-
-    I -->|"HTTPSリクエスト"| H
 
     style Dev fill:#1B2430,color:#fff
     style GitHub fill:#24292e,color:#fff
-    style Pi fill:#C2410C,color:#fff
-    style Internet fill:#2563EB,color:#fff
+    style Phone fill:#2563EB,color:#fff
 ```
 
 **ポイント**
 
-- Piはルーターのポート開放を一切していない。Tailscale FunnelがPiから外向きに接続を確立し、そこにインターネットからのリクエストが中継される仕組み(Piのグローバル待受ポートは無い)
-- 開発者が`git push`する以外、人の手を介さずに本番へ反映される(Watchtowerが自動検知)
-- アプリはアクセスされるたびに日時とUser-Agentを`gasuwari-logs`という名前付きボリュームに記録する(コンテナが作り直されても消えない)
-- **Tailscale Funnelの仕様上、アクセスしてきた人の実IPアドレスはアプリ側にはわからない**(日時とUser-Agentのみ記録可能)
+- 計算は最初から最後までブラウザの中だけで行われる。入力した金額や人数がどこかに送信されることはない
+- 初回だけ GitHub Pages からファイルを取得し、以降は Service Worker のキャッシュから起動する
+- 自宅のRaspberry Piはこのアプリには一切関与しない
 
 ---
 
-## 3. 技術スタック一覧
+## 4. 技術スタック一覧
 
 | 分類 | 技術 | 役割 |
 |---|---|---|
-| フレームワーク | Next.js 16 (App Router) | 画面の描画・ビルド |
+| フレームワーク | Next.js 16 (App Router) | 画面の描画・静的ファイルへの書き出し |
 | UIライブラリ | React 19 | コンポーネントベースのUI |
 | 画像化 | html2canvas | レシート画面をPNG画像化(共有機能) |
-| PWA | `manifest.json` | スマホのホーム画面に追加できるようにする設定 |
-| アクセスログ | Node.js `fs` (Server Component内) | アクセス日時・User-Agentをファイルに記録 |
-| コンテナ化 | Docker (マルチステージビルド) | アプリを実行環境ごとパッケージ化 |
-| 実行基盤 | Raspberry Pi 3 (Raspberry Pi OS Lite 64-bit) | 自宅で常時稼働させるサーバー本体 |
-| 自動更新 | Watchtower (`nickfedor/watchtower`) | 新しいDockerイメージを検知して自動的に再起動 |
-| 外部公開 | Tailscale Funnel | ポート開放・固定IP不要でHTTPS公開 |
-| コード管理 | GitHub (Private リポジトリ) | ソースコードのバージョン管理 |
-| イメージ保管 | GitHub Container Registry (ghcr.io、Public) | ビルド済みDockerイメージの保管場所 |
-| CI/CD | GitHub Actions | pushをトリガーにDockerイメージを自動ビルド・push |
+| 書き出し方式 | `output: 'export'` | サーバー不要の静的HTML/JS/CSSとして `out/` に出力 |
+| PWA | `app/manifest.js` | スマホのホーム画面に追加できるようにする設定 |
+| オフライン対応 | Service Worker (`scripts/sw-template.js`) | アプリ一式をキャッシュし、圏外でも起動できるようにする |
+| 配信 | GitHub Pages | 静的ファイルのホスティング(無料・常時稼働) |
+| CI/CD | GitHub Actions | pushをトリガーにビルドしてPagesへデプロイ |
+| コード管理 | GitHub | ソースコードのバージョン管理 |
+| フォント | Google Fonts (CDN) | Zen Kaku Gothic New / Noto Sans JP / JetBrains Mono |
 
-> **補足: Watchtowerのイメージについて** 最初は本家`containrrr/watchtower`を使っていたが、開発が2年以上止まっており、新しいDocker(v29以降、API v1.40+要求)と非互換になり`client version 1.25 is too old`というエラーでクラッシュループした。有志がメンテナンスを引き継いでいる`nickfedor/watchtower`(設定はそのまま使える drop-in replacement)に切り替えて解決した。
+> **フォントについて**: 書体だけは Google Fonts から読み込んでいる(日本語フォントは自前で持つとサイズが大きすぎるため)。ただし Service Worker が実際に使われたフォントファイルをキャッシュするので、一度表示した後はオフラインでも書体が崩れない。仮に読み込めなくても端末標準のゴシック体にフォールバックするだけで、計算機能には影響しない。
 
 ---
 
-## 4. リクエストの流れ(実行時)
+## 5. basePath(サブパス)の扱い
 
-スマホで `https://raspberrypi.tailbcc39a.ts.net` を開いたときに起きていること:
+GitHub Pages のプロジェクトサイトは `https://<ユーザー名>.github.io/<リポジトリ名>/` というサブパスで配信される。ルート直下ではないので、`/_next/...` のような絶対パスのままだとファイルが見つからない。
 
-1. スマホがそのURLにHTTPSでアクセス
-2. Tailscaleの中継サーバー(Funnel relay)がリクエストを受け取り、Pi上で動いている`tailscaled`まで暗号化された経路で転送
-3. Pi上の`tailscaled`が、あらかじめ設定された転送ルール(`tailscale funnel --bg 3000`)に従って `http://127.0.0.1:3000` に転送
-4. Docker上の`app`コンテナ(Next.jsサーバー)がリクエストを受け取り、`app/page.js`が実行される
-5. `page.js`はリクエストのUser-Agentを取得し、`/app/logs/access.log`(`gasuwari-logs`ボリューム)に1行追記する
-6. 画面のHTML/JS/CSSを返す。以降のボタン操作や計算はすべてブラウザ内(クライアントサイド)で完結する
+そのため `next.config.js` で `basePath` を設定している。
 
-> ※ サーバー側にデータベースはなく、記録しているのは「いつ・どんなブラウザ/端末からアクセスがあったか」のログのみ。計算結果や入力内容はサーバーに送信されない。
+```js
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+```
+
+- **ローカル開発**: 環境変数なし → 空文字 → `http://localhost:3000/`
+- **GitHub Actions**: `actions/configure-pages` が返す `base_path`(= `/gasuwari-nextjs`)を注入
+- **独自ドメインを設定した場合**: `configure-pages` が空文字を返すので、コード側の変更は不要
+
+`app/manifest.js` と `app/layout.js` のアイコン指定も同じ環境変数を参照している。`public/manifest.json` を静的ファイルとして置くと basePath を埋め込めないため、ビルド時に生成する `app/manifest.js` に移してある。
+
+Service Worker(`sw.js`)だけは環境変数を埋め込めないので、自分自身が配信されているURLから basePath を逆算している。
+
+```js
+const BASE = self.location.pathname.replace(/\/sw\.js$/, '');
+```
 
 ---
 
-## 5. デプロイの流れ(コードを直してから本番に反映されるまで)
+## 6. オフライン対応の仕組み
+
+`npm run build` は2段階になっている。
+
+```
+next build                 → out/ に静的ファイルを書き出す
+node scripts/build-sw.mjs  → out/ の中身を読んで out/sw.js を生成する
+```
+
+なぜ Service Worker を「生成」しているのか:
+
+1. **ファイル名が毎回変わる**: Next.js の JS/CSS は `chunks/1p2wrp51tkswc.js` のようにハッシュ付きの名前になるため、キャッシュ対象を手書きで列挙できない
+2. **遅延読み込みのファイルを取りこぼす**: `html2canvas`(約200KB)は「画像として保存」ボタンを押した瞬間に初めて読み込まれる。実際に読み込まれたものだけキャッシュする方式だと、ボタンを押す前に圏外になった場合にシェア機能が動かない
+3. **ブラウザに更新を検知させる**: ブラウザは `sw.js` の中身が1バイトでも変わったときだけ新しい Service Worker をインストールする。ファイル一覧とビルドIDを毎回埋め込むことで、デプロイのたびに確実に更新される
+
+生成された `sw.js` の動作:
+
+| リクエストの種類 | 方針 |
+|---|---|
+| アプリを開く(ページ遷移) | まずネットワーク。失敗したらキャッシュしたHTMLを返す(=圏外でも起動する) |
+| 同一オリジンのJS/CSS/アイコン | キャッシュ優先。ファイル名にハッシュが付いていて中身が変わらないため |
+| Google Fonts | キャッシュを即返しつつ裏で取り直す(stale-while-revalidate) |
+
+インストール時に `out/` の全ファイル(約1.4MB)を一括でキャッシュするので、**一度開いた後は完全にオフラインで動く**。古いビルドのキャッシュは `activate` 時に削除される。
+
+---
+
+## 7. デプロイの流れ
 
 1. Macで `components/` 配下などを編集
 2. `git add . && git commit -m "..." && git push origin main`
 3. GitHub Actions(`.github/workflows/deploy.yml`)が自動起動
-   - リポジトリを取得
-   - QEMUでarm64(ラズパイのCPUアーキテクチャ)エミュレーション環境を用意
-   - `Dockerfile`に従ってNext.jsアプリをビルド
-   - 完成したイメージを `ghcr.io/keitogoto/gasuwari-nextjs:latest` としてpush
-4. ラズパイ上のWatchtowerコンテナが最大60秒おきに`ghcr.io`をチェック
-5. 新しいイメージを検知したら、自動的に`docker pull`→`app`コンテナを再作成・再起動
-6. 数分以内に本番URLに新しいコードが反映される
+   - `npm ci` で依存関係をインストール
+   - `actions/configure-pages` から basePath を取得
+   - `npm run build` で `out/` を生成(Service Worker の生成まで含む)
+   - `actions/upload-pages-artifact` → `actions/deploy-pages` でPagesへ公開
+4. 1〜2分で `https://keitogoto.github.io/gasuwari-nextjs/` に反映される
 
-**今すぐ反映させたい場合(Watchtowerを待たない)**
+**初回だけ必要な設定**: リポジトリの **Settings → Pages → Build and deployment → Source** を `GitHub Actions` にする。
 
-```bash
-cd ~
-docker compose pull
-docker compose up -d
-```
-
-**それでも反映されない・古いイメージのまま動いているように見える場合**
-
-```bash
-docker compose down
-docker compose pull
-docker compose up -d --force-recreate
-docker inspect gasuwari-app --format '{{.Created}}'
-```
-
-最後のコマンドで表示される日時が直近になっていれば、コンテナは正しく作り直されている。
+**Private リポジトリの場合**: GitHub Pages で Private リポジトリを公開するには GitHub Pro が必要。Proを使わないならリポジトリを Public にする(このアプリはサーバー側の秘密情報を持たない)。
 
 ---
 
-## 6. ディレクトリ構成とファイルの役割
+## 8. ディレクトリ構成とファイルの役割
 
 ```
 gasuwari-nextjs/
 ├── app/
-│   ├── layout.js       … 全ページ共通のレイアウト・メタ情報・PWA設定の読み込み
-│   ├── page.js         … トップページ。アクセスログの記録もここで行う
+│   ├── layout.js       … 全ページ共通のレイアウト・メタ情報・Service Worker登録の差し込み
+│   ├── page.js         … トップページ。GasuwariAppを置くだけ(サーバー処理なし)
+│   ├── manifest.js     … PWA設定。basePathを含めるためビルド時に生成する
 │   └── globals.css     … 全体のデザイントークン・スタイル定義
 ├── components/
-│   ├── GasuwariApp.jsx     … 画面全体のロジック(状態管理・計算・シェア処理)。機能追加は主にここ
-│   ├── SegmentedControl.jsx… ガソリン種別選択などのタブ切り替え部品
-│   ├── Stepper.jsx         … 人数の+/-ボタン部品
-│   ├── ExtraCosts.jsx      … 追加費用の行を管理する部品
-│   └── Receipt.jsx         … シェア用レシート表示(画像化される部分)
+│   ├── GasuwariApp.jsx        … 画面全体のロジック(状態管理・計算・シェア処理)。機能追加は主にここ
+│   ├── SegmentedControl.jsx   … ガソリン種別選択などのタブ切り替え部品
+│   ├── Stepper.jsx            … 人数の+/-ボタン部品
+│   ├── ExtraCosts.jsx         … 追加費用の行を管理する部品
+│   ├── Receipt.jsx            … シェア用レシート表示(画像化される部分)
+│   └── ServiceWorkerRegister.jsx … sw.jsを登録するだけの部品(本番ビルド時のみ動作)
+├── scripts/
+│   ├── sw-template.js  … Service Workerの本体(プレースホルダ入りのテンプレート)
+│   └── build-sw.mjs    … out/ を走査してファイル一覧を埋め込み、out/sw.js を書き出す
 ├── public/
-│   ├── manifest.json   … PWA設定(アプリ名・アイコン・テーマカラー)
-│   └── icons/          … ホーム画面用アイコン(apple-icon-180.png / icon-192.png / icon-512.png)
-├── Dockerfile          … 本番用Dockerイメージのビルド手順(3段階: 依存関係→ビルド→実行専用の軽量イメージ)
-├── docker-compose.yml  … ラズパイ上で実際に起動する構成(app + watchtower、ログ用ボリューム含む)
-├── .github/workflows/deploy.yml … GitHub Actionsの自動ビルド設定
-└── next.config.js      … Next.jsの設定(output: 'standalone' でDocker用に最適化)
+│   ├── icons/          … ホーム画面用アイコン(apple-icon-180.png / icon-192.png / icon-512.png)
+│   └── .nojekyll       … GitHub Pages側で `_next` ディレクトリが無視されないようにする保険
+├── .github/workflows/deploy.yml … GitHub Actions(ビルド → GitHub Pagesへデプロイ)
+└── next.config.js      … output: 'export' と basePath の設定
 ```
 
 ---
 
-## 7. アクセスログを確認する手順
-
-Piに保存されているアクセスログ(日時・User-Agent)は、SSH接続して確認する。
+## 9. 開発・デバッグ手順
 
 ```bash
-ssh keito@raspberrypi.local
-
-# 全履歴を一度に見る
-docker compose exec app cat /app/logs/access.log
-
-# リアルタイムで見る(新しいアクセスがあるとその場で表示される)
-docker compose exec app tail -f /app/logs/access.log
+npm install
+npm run dev       # http://localhost:3000
 ```
 
-**出力例**
-
-```
-2026-07-08T21:40:20.637Z    Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36
-2026-07-08T21:45:02.112Z    Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1
-```
-
-**注意点**
-
-- Tailscale Funnelの仕様上、**アクセス元の実IPアドレスは記録されない**(誰が/どこからアクセスしたかまでは特定できない)
-- ログは`gasuwari-logs`という名前付きDockerボリュームに保存されるため、`docker compose down`→`up`やWatchtowerによる自動更新でコンテナが作り直されても消えない
-- ボリューム自体を削除する(`docker volume rm gasuwari-logs`など)と当然ログも消えるので、明示的に消さない限り残り続ける
-
----
-
-## 8. VSCodeでのデバッグ手順
-
-プロジェクトのルート(`gasuwari-nextjs/`)に `.vscode/launch.json` を作成すると、VSCode上でブレークポイントを使ったデバッグができる。以下はNext.js公式ドキュメントに基づく設定。
-
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Next.js: debug server-side",
-      "type": "node-terminal",
-      "request": "launch",
-      "command": "npm run dev -- --inspect"
-    },
-    {
-      "name": "Next.js: debug client-side",
-      "type": "chrome",
-      "request": "launch",
-      "url": "http://localhost:3000"
-    },
-    {
-      "name": "Next.js: debug full stack",
-      "type": "node",
-      "request": "launch",
-      "program": "${workspaceFolder}/node_modules/next/dist/bin/next",
-      "runtimeArgs": ["--inspect"],
-      "skipFiles": ["<node_internals>/**"],
-      "serverReadyAction": {
-        "action": "debugWithChrome",
-        "killOnServerStop": true,
-        "pattern": "- Local:.+(https?://.+)",
-        "uriFormat": "%s",
-        "webRoot": "${workspaceFolder}"
-      }
-    }
-  ]
-}
-```
-
-**使い方**
-
-1. VSCode左側の「実行とデバッグ」パネル(`⇧+⌘+D`)を開く
-2. 上部のドロップダウンで用途に応じた設定を選ぶ
-   - **debug server-side**: `app/page.js`のアクセスログ処理など、サーバーで動くコードにブレークポイントを置きたいとき
-   - **debug client-side**: ボタンのクリック処理や計算ロジックなど、ブラウザで動く部分を止めたいとき。一番よく使うことになるはず
-   - **debug full stack**: 両方同時に見たいとき
-3. `F5`でデバッグ開始。ブレークポイントは行番号の左をクリックして設置
-
-**Dockerコンテナ内のログを見たいとき(本番の挙動確認)**
+本番と同じ静的ファイルを確認したいとき:
 
 ```bash
-docker compose logs -f app        # リアルタイムでアプリのログを流し見る(console.errorなど)
-docker exec -it gasuwari-app sh   # コンテナの中に入って直接調査する
+npm run build     # out/ を生成
+npm run preview   # out/ をローカルサーバーで配信
 ```
 
----
+**Service Worker のデバッグ**
 
-## 9. ラズパイ運用コマンド チートシート
+- `npm run dev` では Service Worker を登録しない(ホットリロードと衝突するため)。オフライン動作を確認したいときは必ず `npm run build && npm run preview` を使う
+- Chrome DevTools の **Application → Service Workers / Cache Storage** で登録状況とキャッシュ内容を確認できる
+- 挙動がおかしいときは Application → Storage → **Clear site data** で全部消してから再読み込みする
+- オフライン動作の確認は DevTools の Network タブで **Offline** にチェックを入れるか、`npm run preview` を止めてから再読み込みする
 
-```bash
-# Macから接続
-ssh keito@raspberrypi.local
+**VSCodeでのデバッグ**
 
-# アプリの状態確認
-docker compose ps
-docker compose logs -f app
-
-# 手動で最新版に更新
-docker compose pull && docker compose up -d
-
-# 反映されない場合は作り直す
-docker compose down
-docker compose pull
-docker compose up -d --force-recreate
-
-# アクセスログを見る
-docker compose exec app cat /app/logs/access.log
-docker compose exec app tail -f /app/logs/access.log
-
-# Tailscale Funnelの状態確認
-sudo tailscale funnel status
-
-# Funnelを一時的に止める / 再開する
-sudo tailscale funnel 3000 off
-sudo tailscale funnel --bg 3000
-
-# Piの再起動
-sudo reboot
-```
-
-**Pi再起動後の注意**: Docker (`restart: unless-stopped`)とtailscaled(systemdサービス)はどちらも自動起動するが、`tailscale funnel`の設定はPiの再起動では原則保持される(tailscaledが設定を保存している)。再起動後は念のため`sudo tailscale funnel status`で確認するとよい。
+`.vscode/launch.json` の **Next.js: debug client-side** を使うのが基本。計算ロジックもボタン処理もすべてブラウザ側で動くため、サーバーサイドのデバッグ構成を使う場面はもう無い。
 
 ---
 
@@ -282,39 +215,37 @@ sudo reboot
 | 症状 | 主な原因 | 対処 |
 |---|---|---|
 | GitHub Actionsが赤い❌で失敗 | ビルドエラー(コードの構文ミスなど) | Actionsタブでログの赤字部分を確認。ローカルで`npm run build`が通るか先に確認する |
-| Watchtowerが`Restarting`を繰り返す/`client version 1.25 is too old`エラー | 本家`containrrr/watchtower`が新しいDocker(v29+)と非互換 | `docker-compose.yml`の`watchtower`イメージを`nickfedor/watchtower`に変更 |
-| Watchtowerが新しいイメージを取ってこない | `ghcr.io`のパッケージが非公開のまま / ラベル未設定 | パッケージがPublicか確認。`app`サービスに`watchtower.enable=true`ラベルがあるか確認 |
-| `docker compose pull`しても`docker inspect`の作成日時が変わらない | 古いコンテナ・ネットワークが残っている | `docker compose down` → `docker compose pull` → `docker compose up -d --force-recreate` |
-| アイコンなど静的ファイルを差し替えたのにスマホで変わらない | iOS Safari側のアイコンキャッシュ | 設定→Safari→履歴とWebサイトデータを消去 → ホーム画面のアイコンを削除して追加し直す |
-| アクセスログのファイルが無い(`No such file or directory`) | まだ一度もアクセスがない/コンテナが新しい設定で再作成されていない | 一度スマホでURLを開いてから確認。反映されていなければ上記の`--force-recreate`を実施 |
-| スマホからURLにアクセスできない | Piの電源が落ちている / Wi-Fiが切れている / Funnelがoffになっている | `ssh`で接続できるか確認 → `sudo tailscale funnel status`を確認 |
-| `docker compose up`でport already in useエラー | 別のプロセスが3000番ポートを使っている | `sudo lsof -i :3000` で確認し、不要なプロセスを止める |
-| ローカルの`npm run dev`は動くのに本番だけ壊れる | 環境差異(Node.jsバージョン違いなど) | `Dockerfile`の`node:20-alpine`とローカルのNode.jsバージョンを揃える |
+| デプロイのステップで権限エラー | Pages の Source が `GitHub Actions` になっていない | Settings → Pages → Build and deployment → Source を `GitHub Actions` に変更 |
+| Private リポジトリでPagesが有効化できない | Private リポジトリのPages公開はGitHub Pro限定 | リポジトリをPublicにするか、Proにする |
+| 画面が真っ白/JSが404になる | basePath が合っていない | Actionsのログで `NEXT_PUBLIC_BASE_PATH` の値を確認。独自ドメイン設定の有無で変わる |
+| コードを直したのにスマホで変わらない | 古いService Workerがキャッシュを返している | ページを再読み込み(通常はこれで新SWが入る)。それでもだめならブラウザのサイトデータを消す |
+| 「画像として保存」が動かない | html2canvasのチャンクが読めていない | DevTools の Cache Storage にチャンクが入っているか確認。`npm run build` で `sw.js を生成しました` のログが出ているかも確認 |
+| アイコンを差し替えたのにスマホで変わらない | iOS Safari側のアイコンキャッシュ | 設定→Safari→履歴とWebサイトデータを消去 → ホーム画面のアイコンを削除して追加し直す |
+| オフラインで開けない | 一度もオンラインで開いていない/SW未登録 | 一度オンラインで開く必要がある。`npm run dev` ではSWは登録されない |
 
 ---
 
 ## 11. 用語集(この分野に馴染みがない人向け)
 
-- **Docker / コンテナ**: アプリと、それが動くのに必要なもの(Node.jsなど)を一つの箱(コンテナ)にまとめる技術。「自分のPCでは動くのに本番では動かない」問題を減らせる
-- **Dockerイメージ**: コンテナの元になる、実行前のパッケージされたファイル一式
-- **Dockerボリューム**: コンテナが作り直されても残しておきたいデータ(今回はアクセスログ)を保存しておく場所
-- **GHCR (GitHub Container Registry)**: DockerイメージをGitHub上に保管しておく場所。`ghcr.io/ユーザー名/イメージ名`という住所で管理される
-- **CI/CD**: コードを変更したら自動でテスト・ビルド・配布・反映まで行う仕組み全般の呼び方。今回は「pushしたら自動でビルド→自動で本番反映」の部分がこれにあたる
-- **Watchtower**: 動いているDockerコンテナを監視し、新しいイメージが公開されたら自動で入れ替えてくれる補助ツール
-- **Tailscale**: 複数の端末同士を安全に直接つなぐ仮想ネットワーク(VPN)サービス。今回はその中の「Funnel」機能で、ラズパイの中の1つのサービスだけをインターネットに公開している
+- **静的サイト(static site)**: あらかじめ完成したHTML/CSS/JavaScriptのファイルを置いておくだけのWebサイト。アクセスのたびにサーバーで処理を実行する動的サイトと違い、動かすためのサーバーが要らない
+- **`output: 'export'`**: Next.jsのビルド設定。アプリを静的ファイル一式(`out/`)として書き出すモード
+- **basePath**: サイトがドメインの直下ではなくサブパス(`/gasuwari-nextjs/`)で配信されるときに、全てのリンクやファイルパスの先頭に付ける文字列
+- **Service Worker**: ブラウザがページとは別に裏で動かす小さなプログラム。通信を横取りして、キャッシュから返したり、オフライン時の動作を制御したりできる
+- **キャッシュ優先 / stale-while-revalidate**: Service Workerの代表的な方針。前者は「キャッシュがあればネットワークを見ない」、後者は「キャッシュを即返しつつ裏で新しいものを取り直す」
 - **PWA (Progressive Web App)**: 普通のWebサイトを、スマホのホーム画面にアイコンとして追加してアプリのように使えるようにする仕組み
-- **standalone出力**: Next.jsのビルド時に、Docker配布に必要な最小限のファイルだけを`.next/standalone`にまとめてくれる機能
+- **GitHub Pages**: GitHubが提供する静的サイトのホスティングサービス。リポジトリの内容をそのままWebサイトとして公開できる
+- **GitHub Actions**: GitHub上で動く自動化の仕組み。今回は「pushしたら自動でビルドしてPagesへ公開」を担当している
+- **CI/CD**: コードを変更したら自動でテスト・ビルド・配布・反映まで行う仕組み全般の呼び方
 
 ---
 
 ## 12. 今後の拡張の進め方(参考)
 
-新しい機能を追加したくなったら、次の順で進めるとスムーズ。
-
-1. `components/GasuwariApp.jsx`など該当ファイルを編集(必要ならVSCodeのデバッガでロジックを確認)
-2. `npm run dev`でローカル確認
-3. `npm run build`でビルドが通ることを確認(本番と同じ条件でのチェック)
+1. `components/GasuwariApp.jsx` など該当ファイルを編集
+2. `npm run dev` でローカル確認
+3. `npm run build && npm run preview` で本番と同じ静的ファイル + オフライン動作を確認
 4. `git add . && git commit -m "機能: ○○を追加" && git push origin main`
 5. GitHub Actionsが緑✅になるのを確認
-6. 数分待つか、Piで手動`docker compose pull && up -d`(反映されなければ`--force-recreate`)
-7. スマホで動作確認
+6. スマホで動作確認(反映されない場合は一度再読み込みしてService Workerを更新する)
+
+**サーバーが必要になる機能を足したくなったら**: アクセス解析や履歴のクラウド保存など、どうしてもサーバーが要る機能を入れる場合は、この静的サイト構成のまま外部サービス(アクセス解析SaaSなど)を足すか、APIだけを別に用意するのが素直。アプリ本体をサーバー実行に戻す必要はない。

@@ -1,47 +1,58 @@
-name: Build and Push Docker Image
+name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# デプロイ中に新しいpushが来ても、実行中のものは中断せず順番に流す
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
 
-      - name: イメージ名を小文字化(ghcr.ioの要件)
-        run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
-      - name: QEMU セットアップ (arm64エミュレーション用)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Buildx セットアップ
-        uses: docker/setup-buildx-action@v3
-
-      - name: ghcr.io へログイン
-        uses: docker/login-action@v3
+      - name: Node.js をセットアップ
+        uses: actions/setup-node@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          node-version: 20
+          cache: npm
 
-      - name: ビルド & プッシュ (linux/arm64 = Raspberry Pi向け)
-        uses: docker/build-push-action@v6
+      - name: 依存関係をインストール
+        run: npm ci
+
+      - name: Pages の設定を取得(basePath の判定に使う)
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: 静的サイトをビルド(out/ に書き出される)
+        env:
+          # プロジェクトサイトなら "/gasuwari-nextjs"、独自ドメインなら空文字が入る
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: npm run build
+
+      - name: 成果物をアップロード
+        uses: actions/upload-pages-artifact@v3
         with:
-          context: .
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          path: ./out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: GitHub Pages へデプロイ
+        id: deployment
+        uses: actions/deploy-pages@v4

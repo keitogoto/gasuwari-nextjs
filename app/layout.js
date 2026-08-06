@@ -1,12 +1,16 @@
 import './globals.css';
+import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
+
+// GitHub Pages のサブパス配信に合わせるための接頭辞(next.config.js と同じ値)
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
 export const metadata = {
   title: 'ガスワリ！',
   description: 'ドライブ費用の割り勘計算アプリ',
-  manifest: '/manifest.json',
+  // manifest は app/manifest.js から自動でリンクされるのでここには書かない
   icons: {
-    icon: '/icons/icon-192.png',
-    apple: '/icons/icon-192.png',
+    icon: `${basePath}/icons/icon-192.png`,
+    apple: `${basePath}/icons/icon-192.png`,
   },
 };
 
@@ -28,7 +32,10 @@ export default function RootLayout({ children }) {
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <ServiceWorkerRegister />
+      </body>
     </html>
   );
 }

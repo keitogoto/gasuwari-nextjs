@@ -1,7 +1,8 @@
 # ガスワリ！(Next.js版)
 
-ドライブ費用の割り勘計算アプリ。Next.js + Docker + Cloudflare Tunnel + GitHub Actions で
-「`git push` するとラズパイの本番環境に自動反映される」構成になっています。
+ドライブ費用の割り勘計算アプリ。**サーバーを一切使わない静的サイト**として GitHub Pages に配信し、
+Service Worker により2回目以降はオフラインでも動きます。`git push` すると GitHub Actions が
+自動でビルド・デプロイします。
 
 ## 1. ローカル開発
 
@@ -13,89 +14,70 @@ npm run dev
 `http://localhost:3000` で確認できます。`components/GasuwariApp.jsx` が画面のメインロジックです。
 機能追加は基本的にこのファイルと `components/` 配下の編集で完結します。
 
-## 2. GitHubリポジトリの作成
+本番と同じ静的ファイルを確認したいときは:
 
 ```bash
-git init
-git add .
-git commit -m "initial commit"
-gh repo create gasuwari-nextjs --private --source=. --remote=origin --push
-# または https://github.com/new でリポジトリ作成後、
-# git remote add origin https://github.com/keitogoto/gasuwari-nextjs.git && git push -u origin main
+npm run build && npm run preview
 ```
 
-`docker-compose.yml` の `image:` は既に `ghcr.io/keitogoto/gasuwari-nextjs:latest` に設定済みです。
-リポジトリ名を `gasuwari-nextjs`以外にする場合は、この行を実際のリポジトリ名に合わせて書き換えてください。
+> Service Worker は本番ビルドでのみ登録されます(`npm run dev` では無効)。
 
-### パッケージ(イメージ)の公開設定
+## 2. GitHub Pages の初期設定(初回のみ)
 
-`main` にpushすると GitHub Actions が `ghcr.io/keitogoto/gasuwari-nextjs` にイメージをpushします。
-デフォルトでは非公開になるため、ラズパイ側で認証なしにpullできるようにするには次のどちらかが必要です。
+1. リポジトリの **Settings → Pages** を開く
+2. **Build and deployment → Source** を `GitHub Actions` にする
+3. `main` に push すると `.github/workflows/deploy.yml` が動き、
+   `https://keitogoto.github.io/gasuwari-nextjs/` に公開される
 
-- GitHubの `Packages` タブ → 該当パッケージ → Package settings → **Change visibility** → Public にする(お試し・個人利用ならこれが簡単)
-- または非公開のままにして、ラズパイ側で読み取り専用PAT(`read:packages`権限)を使いログインする:
-  ```bash
-  echo <PAT> | docker login ghcr.io -u <GitHubユーザー名> --password-stdin
-  ```
+> **Private リポジトリの場合**: GitHub Pages で Private リポジトリを公開するには GitHub Pro が必要です。
+> Pro を使わない場合はリポジトリを Public にしてください(このアプリはサーバー側の秘密情報を持たないため、
+> Public にしても漏れて困るものはありません)。
 
-## 3. ラズパイのセットアップ
+## 3. サブパス(basePath)について
 
-```bash
-# Raspberry Pi OS Lite (64-bit) 前提
-sudo apt update && sudo apt full-upgrade -y
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-sudo apt install -y docker-compose-plugin
-# 一度ログアウト/再ログインしてdockerグループを反映
-```
+GitHub Pages のプロジェクトサイトは `https://<ユーザー名>.github.io/<リポジトリ名>/` という
+サブパスで配信されます。そのため `next.config.js` の `basePath` を設定する必要があり、
+値は GitHub Actions が `actions/configure-pages` の出力から `NEXT_PUBLIC_BASE_PATH` に注入します。
 
-このリポジトリを `git clone` するか、`docker-compose.yml` と `.env` だけをラズパイに置きます。
+- ローカル開発: 空文字 → `http://localhost:3000/`
+- GitHub Pages: `/gasuwari-nextjs` → `https://keitogoto.github.io/gasuwari-nextjs/`
 
-## 4. Cloudflare Tunnel の設定
+独自ドメインを設定した場合は `configure-pages` が空文字を返すので、コードの変更は不要です。
 
-1. ドメインをCloudflareに登録(ネームサーバーを切り替え済みであること)
-2. [Cloudflare Zero Trustダッシュボード](https://one.dash.cloudflare.com/) → **Networks → Tunnels → Create a tunnel**
-3. Connector type は **Docker** を選択 → トンネル名を入力(例: `gasuwari`)
-4. 表示される起動コマンドの中の **トークン部分だけ** をコピーし、ラズパイ上に `.env` ファイルを作成:
-   ```
-   TUNNEL_TOKEN=ここに発行されたトークンを貼る
-   ```
-5. 続けて **Public Hostname** を追加:
-   - Subdomain: `gasuwari`(お好みで)
-   - Domain: 自分の取得したドメイン
-   - Service Type: `HTTP`
-   - URL: `app:3000` (docker-composeのサービス名。同じcomposeネットワーク内なのでホスト名で到達できます)
+## 4. 開発フロー(2回目以降)
 
-## 5. 起動
+1. ローカルで機能追加 → `npm run dev` で確認
+2. `npm run build` が通ることを確認
+3. `git add . && git commit -m "..." && git push origin main`
+4. GitHub Actions が緑✅になれば公開URLに反映(1〜2分)
+5. スマホで開く。Service Worker が更新を取り込むので、再読み込みすれば新しい版になります
 
-```bash
-cd gasuwari-nextjs   # docker-compose.ymlのある場所
-docker compose pull
-docker compose up -d
-```
+## 5. スマホへのインストール
 
-`https://gasuwari.あなたのドメイン` でアクセスできれば成功です。スマホのブラウザでこのURLを開き、
-「ホーム画面に追加」するとアイコン付きのアプリのように使えます(`manifest.json`で設定済み)。
-
-## 6. 開発フロー(2回目以降)
-
-1. ローカルで機能追加 → `git add . && git commit -m "..." && git push origin main`
-2. GitHub Actions が自動でarm64向けDockerイメージをビルドし `ghcr.io` にpush(Actionsタブで進捗確認可)
-3. ラズパイ上のWatchtowerが最大60秒間隔でチェックし、新しいイメージを検知したら自動でpull & 再起動
-4. 特に何もしなくても数分以内に本番環境(Cloudflare Tunnel経由のURL)に反映されます
-
-手動で今すぐ反映したい場合はラズパイ上で:
-```bash
-docker compose pull && docker compose up -d
-```
+公開URLをスマホのブラウザで開き、「ホーム画面に追加」するとアイコン付きのアプリのように使えます
+(`app/manifest.js` で設定済み)。一度開いておけば、以降は圏外・機内モードでも起動して計算できます。
 
 ## ディレクトリ構成
 
 ```
-app/                Next.js App Router (layout, page, グローバルCSS)
+app/
+├── layout.js       全ページ共通のレイアウト・メタ情報
+├── page.js         トップページ(コンポーネントを置くだけ)
+├── manifest.js     PWA設定(basePathを含めるためビルド時に生成)
+└── globals.css     デザイントークン・スタイル定義
 components/         画面を構成するReactコンポーネント
-public/             manifest.json, PWAアイコン
-Dockerfile          マルチステージビルド(standalone出力)
-docker-compose.yml  ラズパイ本番用(app / cloudflared / watchtower)
-.github/workflows/  GitHub Actions (mainへのpushで自動ビルド&push)
+├── GasuwariApp.jsx        画面全体のロジック。機能追加は主にここ
+├── SegmentedControl.jsx   ガソリン種別のタブ切り替え
+├── Stepper.jsx            人数の +/- ボタン
+├── ExtraCosts.jsx         追加費用の行
+├── Receipt.jsx            シェア用レシート(画像化される部分)
+└── ServiceWorkerRegister.jsx  Service Workerの登録
+scripts/
+├── sw-template.js  Service Workerのテンプレート
+└── build-sw.mjs    out/ のファイル一覧を埋め込んで out/sw.js を生成
+public/             PWAアイコン、.nojekyll
+.github/workflows/  GitHub Actions (mainへのpushでビルド&Pagesへデプロイ)
+next.config.js      output: 'export' + basePath
 ```
+
+詳しい仕組みは [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。
